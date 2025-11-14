@@ -1,11 +1,4 @@
-"""
-utils.py
-
-Utility functions for:
-- Configuration handling
-- Time series + ARIMA modeling
-- Simple placeholder conversational "agent" logic
-"""
+# utils.py
 
 from __future__ import annotations
 
@@ -15,11 +8,6 @@ from typing import Any, Dict, Tuple
 
 import pandas as pd
 from statsmodels.tsa.arima.model import ARIMA
-
-
-# -------------------------------------------------------------------
-# Config model
-# -------------------------------------------------------------------
 
 
 @dataclass
@@ -33,10 +21,6 @@ class AppConfig:
 
     @classmethod
     def from_env(cls) -> "AppConfig":
-        """
-        Load default config from environment variables (if present).
-        This keeps Streamlit UI defaults in sync with the backend.
-        """
         return cls(
             project_id=os.getenv("GCP_PROJECT", ""),
             dataset_id=os.getenv("BQ_DATASET", ""),
@@ -47,11 +31,6 @@ class AppConfig:
         )
 
 
-# -------------------------------------------------------------------
-# ARIMA helpers
-# -------------------------------------------------------------------
-
-
 def fit_arima_and_forecast(
     df: pd.DataFrame,
     ts_col: str,
@@ -59,17 +38,11 @@ def fit_arima_and_forecast(
     periods: int = 14,
     order: Tuple[int, int, int] = (1, 1, 1),
 ) -> Dict[str, Any]:
-    """
-    Fit a basic ARIMA model and return forecast results.
-
-    Returns a dict so it's easy to extend later (e.g. add confidence intervals).
-    """
     if df.empty:
-        raise ValueError("Received empty DataFrame for ARIMA model.")
+        raise ValueError("ARIMA received an empty dataframe.")
 
-    # Ensure sorted and set index
     df = df[[ts_col, target_col]].dropna().sort_values(ts_col)
-    ts = df.set_index(ts_col)[target_col].asfreq("D")  # assume daily for now
+    ts = df.set_index(ts_col)[target_col].asfreq("D")
 
     model = ARIMA(ts, order=order)
     fitted = model.fit()
@@ -84,64 +57,37 @@ def fit_arima_and_forecast(
 
 
 def forecast_to_dataframe(result: Dict[str, Any]) -> pd.DataFrame:
-    """
-    Convert ARIMA results dict into a tidy DataFrame for plotting/display.
-    """
     history = result["history"]
     forecast = result["forecast"]
 
-    df_hist = history.to_frame(name="y")
-    df_hist["type"] = "history"
+    hist_df = history.to_frame(name="y")
+    hist_df["type"] = "history"
 
-    df_fc = forecast.to_frame(name="y")
-    df_fc["type"] = "forecast"
+    fc_df = forecast.to_frame(name="y")
+    fc_df["type"] = "forecast"
 
-    return pd.concat([df_hist, df_fc])
-
-
-# -------------------------------------------------------------------
-# Simple placeholder conversational "agent"
-# -------------------------------------------------------------------
+    return pd.concat([hist_df, fc_df])
 
 
-def handle_user_message(
-    message: str,
-    *,
-    config: AppConfig,
-) -> str:
-    """
-    Placeholder conversational logic.
+def handle_user_message(message: str, config: AppConfig) -> str:
+    msg = message.lower()
 
-    For now this is just rule-based and does NOT call Vertex AI yet.
-    Later we'll replace this with a real Vertex AI / tools-based agent.
-
-    The goal is to wire the Streamlit UI and overall flow first.
-    """
-    text = message.lower()
-
-    if "help" in text:
+    if "help" in msg:
         return (
-            "Hi! I'm your time-series data agent.\n\n"
+            "Hi! I'm your prototype data agent.\n\n"
             "Right now I can:\n"
-            "- Load a time series from BigQuery (once credentials are configured)\n"
-            "- Fit a basic ARIMA model and show a forecast\n\n"
-            "Use the sidebar to set dataset/table, then click 'Run demo forecast'.\n"
-            "Later we will upgrade me to a full Vertex AI agent that can answer free-text questions."
+            "• Read config from your .env file\n"
+            "• Query BigQuery (once configured)\n"
+            "• Run ARIMA forecasting\n\n"
+            "Later: full Vertex AI agent with tool-calling."
         )
 
-    if "forecast" in text:
+    if "forecast" in msg:
         return (
-            f"Great, we will forecast `{config.target_column}` from "
-            f"`{config.dataset_id}.{config.table_id}` for about {config.default_horizon} steps. "
-            "Use the 'Forecast horizon' slider and the button below."
+            f"Preparing to forecast `{config.target_column}` from "
+            f"{config.dataset_id}.{config.table_id} "
+            f"for {config.default_horizon} steps.\n"
+            "Use the button below."
         )
 
-    # default
-    return (
-        "I'm still a simple prototype 🤖.\n"
-        "Right now you can:\n"
-        "- Ask for 'help'\n"
-        "- Mention 'forecast'\n\n"
-        "We will later connect me to Vertex AI so I can understand arbitrary questions "
-        "and automatically decide whether to query BigQuery or run ARIMA."
-    )
+    return "I'm still a simple prototype 🤖.\nTry asking:\n• 'help'\n• 'forecast'"
