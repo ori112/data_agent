@@ -61,12 +61,11 @@ def main() -> None:
     st.sidebar.info(
         "These values are pre-filled from your .env.\n"
         "Once your GCP project is ready, update:\n\n"
-        "**GCP_PROJECT**\n"
-        "**BQ_DATASET**\n"
-        **BQ_TABLE**\n"
-        "**GOOGLE_APPLICATION_CREDENTIALS**"
+        "- **GCP_PROJECT**\n"
+        "- **BQ_DATASET**\n"
+        "- **BQ_TABLE**\n"
+        "- **GOOGLE_APPLICATION_CREDENTIALS**"
     )
-
     # -----------------------------
     # CONVERSATIONAL UI
     # -----------------------------
