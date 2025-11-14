@@ -3,17 +3,19 @@ vertex_agent.py
 
 Vertex AI–backed conversational data agent.
 
-Responsibilities (design for the course):
-- Use Gemini on Vertex AI to understand natural-language questions.
+Capabilities (designed for your course project):
+- Understand questions about the dataset.
 - Decide whether to:
-  * Just answer conceptually ("what is ARIMA", "how many rows do we have?", etc.)
-  * Explain or describe the dataset (columns, metrics, etc.)
-  * Trigger a time-series forecast (ARIMA) on the configured dataset.
+  * answer conceptually,
+  * run time-series diagnostics (ACF/PACF, decomposition, ADF),
+  * run a full SARIMA workflow similar to your Colab notebook,
+  * run a basic ARIMA-style forecast (simpler path).
 
-Implementation notes:
-- Uses a simple JSON "plan" protocol (action + parameters) instead of full
-  function-calling to keep the code readable for a university project.
-- Later, you can upgrade this to real Vertex AI function calling if needed.
+The agent returns:
+- text  -> explanation/answer for the user (LLM generated)
+- plan  -> JSON "plan" the model proposed (for debugging / logging)
+- figures -> list of matplotlib Figure objects (for Streamlit plotting)
+- tables  -> dict of name -> DataFrame (for Streamlit tables)
 """
 
 from __future__ import annotations
@@ -21,17 +23,31 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
 
 from bigquery_client import BigQueryClient
 from utils import AppConfig, fit_arima_and_forecast, forecast_to_dataframe
+from timeseries_tools import (
+    plot_time_series,
+    log_transform,
+    plot_acf_pacf_series,
+    seasonal_decompose_plot,
+    run_adf_test,
+    train_test_split_series,
+    fit_sarima,
+    residual_diagnostics,
+    sarima_forecast_plots,
+)
 
 
 # ---------------------------------------------------------------------------
-# Vertex AI configuration
+# Vertex AI configuration dataclass
 # ---------------------------------------------------------------------------
 
 
@@ -45,11 +61,12 @@ class VertexConfig:
     def from_env(cls) -> "VertexConfig":
         """
         Load Vertex AI config from environment variables (.env).
+
         Required:
           - GCP_PROJECT
         Optional:
-          - VERTEX_LOCATION (default: us-central1)
-          - VERTEX_MODEL    (default: gemini-1.5-pro-001)
+          - VERTEX_LOCATION  (default: us-central1)
+          - VERTEX_MODEL     (default: gemini-1.5-pro-001)
         """
         project_id = os.getenv("GCP_PROJECT")
         if not project_id:
@@ -69,36 +86,36 @@ class VertexConfig:
 
 
 # ---------------------------------------------------------------------------
-# DataAgent: orchestrates Gemini + BigQuery + ARIMA
+# DataAgent orchestrating Gemini + BigQuery + TS tools
 # ---------------------------------------------------------------------------
 
 
 class DataAgent:
     """
     High-level agent that:
-      - talks to Gemini (Vertex AI)
-      - optionally queries BigQuery
-      - optionally trains/runs ARIMA forecast
+      - Calls Gemini (Vertex AI) to understand the question.
+      - Optionally loads time series from BigQuery.
+      - Optionally runs diagnostics or SARIMA/ARIMA workflows.
 
-    This is NOT connected to Streamlit yet – app.py still uses the simple
-    handle_user_message() stub. Later, you will:
-      - create one DataAgent instance in app.py
-      - call agent.handle_message(user_input) for each chat turn
-      - display agent_response["text"] + optional tables/plots
+    NOTE: This is not wired into Streamlit yet. Once your GCP project and
+    Vertex AI are configured, you'll:
+      - create a single DataAgent instance in app.py
+      - call agent.handle_message(user_input) per chat turn
+      - display result["text"], result["figures"], result["tables"].
     """
 
     def __init__(self, app_config: AppConfig, vertex_config: VertexConfig) -> None:
         self.app_config = app_config
         self.vertex_config = vertex_config
 
-        # Init Vertex AI client & model
+        # Init Vertex AI
         vertexai.init(
             project=self.vertex_config.project_id,
             location=self.vertex_config.location,
         )
         self.model = GenerativeModel(self.vertex_config.model_name)
 
-        # BigQuery client (will use same GCP project + service account)
+        # BigQuery client (same project / credentials)
         self.bq_client = BigQueryClient.from_env()
 
     # -----------------------------
@@ -109,86 +126,122 @@ class DataAgent:
         Main method called from the UI.
 
         Returns a dict with:
-          - "text": final natural-language answer for the user
-          - "plan": JSON action the model proposed
-          - "data": optional DataFrame (for UI tables) – currently None
-          - "forecast_df": optional forecast DataFrame – currently None
+          - "text": natural-language answer
+          - "plan": JSON action spec from Gemini
+          - "figures": list[matplotlib.figure.Figure] (for plotting in Streamlit)
+          - "tables": dict[str, pd.DataFrame] (for showing in Streamlit)
         """
         plan = self._plan_with_model(user_message)
-
         action = plan.get("action", "answer_only")
-        explanation = plan.get("explanation", "")
 
-        data = None
-        forecast_df = None
+        answer: str
+        figures: List[plt.Figure] = []
+        tables: Dict[str, pd.DataFrame] = {}
 
         if action == "answer_only":
-            # Pure LLM answer – no BigQuery/ARIMA
-            answer = plan.get("answer", explanation)
+            answer = plan.get("answer", plan.get("explanation", ""))
 
         elif action == "describe_dataset":
-            # Ask Gemini to describe dataset based on columns, metric, etc.
             answer = self._answer_about_dataset(user_message)
 
         elif action == "forecast":
             periods = int(plan.get("forecast_periods", self.app_config.default_horizon))
-            answer, forecast_df = self._run_forecast(periods=periods)
+            answer, df_fc = self._run_simple_arima_forecast(periods=periods)
+            if df_fc is not None:
+                tables["forecast"] = df_fc
+
+        elif action == "diagnostics_plots":
+            answer, figures = self._run_ts_diagnostics()
+
+        elif action == "adf_test":
+            answer, tables = self._run_adf_workflow()
+
+        elif action == "sarima_workflow":
+            answer, figures, tables = self._run_sarima_workflow()
 
         else:
-            # Fallback
             answer = (
-                "I couldn't confidently decide what to do with that question.\n\n"
-                "Try asking something like:\n"
-                "- 'Describe the dataset'\n"
-                "- 'Forecast the metric for the next 14 days'\n"
+                "I couldn't confidently decide which time-series tool to use.\n\n"
+                "Try something like:\n"
+                "- 'Plot and diagnose the time series'\n"
+                "- 'Run ADF test on the series'\n"
+                "- 'Run the full SARIMA workflow like in the notebook'\n"
+                "- 'Forecast the metric for the next 12 months'\n"
             )
 
         return {
             "text": answer,
             "plan": plan,
-            "data": data,
-            "forecast_df": forecast_df,
+            "figures": figures,
+            "tables": tables,
         }
 
     # -----------------------------
-    # Internal helpers
+    # LLM planning
     # -----------------------------
 
     def _plan_with_model(self, user_message: str) -> Dict[str, Any]:
         """
         Ask Gemini to output a small JSON "plan" telling us what to do.
 
-        Expected JSON shape:
-        {
-          "action": "answer_only" | "describe_dataset" | "forecast",
-          "forecast_periods": 14,
-          "explanation": "why this action makes sense",
-          "answer": "direct answer if no tools are needed"
-        }
+        Supported actions:
+
+        - "answer_only":
+            Conceptual / theoretical questions; answer directly, no tools.
+
+        - "describe_dataset":
+            User asks about what the dataset is, how it might be used, etc.
+
+        - "forecast":
+            User explicitly asks to forecast/predict the target variable but
+            does not mention SARIMA diagnostics. Use simple ARIMA pipeline.
+
+        - "diagnostics_plots":
+            User asks to inspect / visualize the series, e.g.:
+            'plot the series', 'acf', 'pacf', 'decompose', 'check seasonality'.
+
+        - "adf_test":
+            User mentions stationarity, unit root, ADF, Augmented Dickey-Fuller, etc.
+
+        - "sarima_workflow":
+            User wants the full modeling pipeline like the notebook:
+            log transform, train/test split, SARIMA fit, residual diagnostics,
+            and forecast with confidence intervals.
+
+        You must respond ONLY with JSON (no markdown, no extra text).
         """
+
         system_prompt = f"""
-You are a data analyst assistant working with a BigQuery time-series dataset.
+You are a time-series data analyst assistant working with a BigQuery dataset.
 
-The main dataset is:
-  project: {self.app_config.project_id or "[GCP_PROJECT env]"}
-  dataset: {self.app_config.dataset_id or "[BQ_DATASET env]"}
-  table:   {self.app_config.table_id or "[BQ_TABLE env]"}
-  date column: {self.app_config.date_column}
-  target column: {self.app_config.target_column}
+Dataset configuration:
+  - project: {self.app_config.project_id or "[GCP_PROJECT env]"}
+  - dataset: {self.app_config.dataset_id or "[BQ_DATASET env]"}
+  - table:   {self.app_config.table_id or "[BQ_TABLE env]"}
+  - date column: {self.app_config.date_column}
+  - target column: {self.app_config.target_column}
 
-You must respond STRICTLY in JSON (no markdown, no extra text) with the following keys:
+Respond STRICTLY in JSON with keys:
 
 - "action": one of:
-    - "answer_only"       -> question is conceptual; answer directly, no tools
-    - "describe_dataset"  -> user is asking about columns, metric, time grain, etc.
-    - "forecast"          -> user explicitly asks to forecast / predict the target
+    "answer_only",
+    "describe_dataset",
+    "forecast",
+    "diagnostics_plots",
+    "adf_test",
+    "sarima_workflow"
 
-- "forecast_periods": integer steps for forecasting (only used when action="forecast").
-- "explanation": short natural language explanation of why you chose this action.
-- "answer": direct natural language answer if action="answer_only".
+- "forecast_periods": integer, only used when action == "forecast".
+  Choose a reasonable horizon (e.g. 7, 14, 30, or 12 for months).
 
-If the user wants a prediction, use "forecast", and choose a reasonable horizon
-(e.g. 7, 14, or 30) in "forecast_periods".
+- "explanation": short natural language explanation WHY you chose this action.
+
+- "answer": direct natural language answer, ONLY when action == "answer_only".
+
+If the user wants a deep modeling workflow, including diagnostics like ACF/PACF,
+seasonal decomposition, residual plots, and SARIMA, choose "sarima_workflow".
+If they explicitly ask about stationarity or ADF, choose "adf_test".
+If they simply ask for basic inspection of the series, choose "diagnostics_plots".
 """
 
         cfg = GenerationConfig(
@@ -205,23 +258,208 @@ If the user wants a prediction, use "forecast", and choose a reasonable horizon
         try:
             plan = json.loads(raw)
         except json.JSONDecodeError:
-            # Fallback: treat as a plain answer
+            # Fallback: treat as a direct answer
             plan = {
                 "action": "answer_only",
                 "answer": raw,
                 "explanation": "Model did not return valid JSON; treated as direct answer.",
             }
 
-        # Ensure mandatory keys exist
         plan.setdefault("action", "answer_only")
         plan.setdefault("explanation", "")
         return plan
 
+    # -----------------------------
+    # Concrete actions
+    # -----------------------------
+
+    def _load_series(self) -> pd.DataFrame:
+        """Load the base time series from BigQuery as a DataFrame."""
+        df = self.bq_client.get_time_series(
+            dataset=self.app_config.dataset_id,
+            table=self.app_config.table_id,
+            date_column=self.app_config.date_column,
+            target_column=self.app_config.target_column,
+            limit=365,
+        )
+        if df.empty:
+            raise ValueError(
+                "BigQuery returned no data. Check dataset, table, and column names."
+            )
+        return df
+
+    def _run_simple_arima_forecast(
+        self,
+        periods: int,
+    ) -> tuple[str, Optional[pd.DataFrame]]:
+        """Use existing ARIMA helper for a simpler forecast."""
+        df = self._load_series()
+        result = fit_arima_and_forecast(
+            df=df,
+            ts_col="ts",
+            target_col="y",
+            periods=periods,
+        )
+        df_fc = forecast_to_dataframe(result)
+
+        text = (
+            f"I ran a basic ARIMA model on `{self.app_config.target_column}` and "
+            f"forecasted the next {periods} time steps. The table 'forecast' "
+            "contains both history and forecast values."
+        )
+        return text, df_fc
+
+    def _run_ts_diagnostics(self) -> tuple[str, List[plt.Figure]]:
+        """
+        Run notebook-style diagnostics:
+          - plot of series (log transformed)
+          - ACF and PACF
+          - seasonal decomposition
+        """
+        df = self._load_series()
+        df_log = log_transform(df, "y")
+
+        figs: List[plt.Figure] = []
+
+        # 1. Time series plot (log)
+        fig_ts = plot_time_series(
+            df_log, date_col="ts", value_col="y", title="Log-transformed series"
+        )
+        figs.append(fig_ts)
+
+        # 2. ACF & PACF
+        fig_acf, fig_pacf = plot_acf_pacf_series(df_log["y"])
+        figs.extend([fig_acf, fig_pacf])
+
+        # 3. Seasonal decomposition
+        fig_decomp = seasonal_decompose_plot(df_log["y"], period=12, model="additive")
+        figs.append(fig_decomp)
+
+        text = (
+            "I logged the series to stabilize variance, then produced:\n"
+            "- A line plot of the log-transformed series\n"
+            "- ACF and PACF plots to inspect autocorrelation\n"
+            "- An additive seasonal decomposition with period=12\n\n"
+            "You can use these plots to reason about trend, seasonality, and "
+            "appropriate SARIMA orders."
+        )
+
+        return text, figs
+
+    def _run_adf_workflow(self) -> tuple[str, Dict[str, pd.DataFrame]]:
+        """
+        Run ADF test on (log-transformed) series and return a summary table.
+        """
+        df = self._load_series()
+        df_log = log_transform(df, "y")
+        stats = run_adf_test(df_log["y"])
+
+        summary_df = pd.DataFrame(
+            {
+                "ADF Statistic": [stats["adf_statistic"]],
+                "p-value": [stats["p_value"]],
+                "used_lag": [stats["used_lag"]],
+                "n_obs": [stats["n_obs"]],
+                "is_stationary": [stats["is_stationary"]],
+            }
+        )
+
+        crit_df = pd.DataFrame(
+            list(stats["critical_values"].items()),
+            columns=["Significance level", "Critical value"],
+        )
+
+        text = (
+            "I ran the Augmented Dickey-Fuller (ADF) test on the log-transformed series.\n\n"
+            f"{stats['interpretation']}\n\n"
+            "You can inspect the exact statistic, p-value, and critical values "
+            "in the returned tables."
+        )
+
+        tables = {
+            "adf_summary": summary_df,
+            "adf_critical_values": crit_df,
+        }
+
+        return text, tables
+
+    def _run_sarima_workflow(
+        self,
+    ) -> tuple[str, List[plt.Figure], Dict[str, pd.DataFrame]]:
+        """
+        Reproduce your notebook-style workflow:
+
+        - log transform series
+        - train/test split (80/20)
+        - fit SARIMA(1,0,0)x(0,1,1,12)
+        - residual diagnostics (residuals + ACF/PACF)
+        - forecast in log scale and original scale
+        """
+        df = self._load_series()
+        df_log = log_transform(df, "y")
+        series = df_log.set_index("ts")["y"]
+
+        train, test = train_test_split_series(series, train_ratio=0.8)
+        results = fit_sarima(
+            train,
+            order=(1, 0, 0),
+            seasonal_order=(0, 1, 1, 12),
+        )
+
+        figs: List[plt.Figure] = []
+        tables: Dict[str, pd.DataFrame] = {}
+
+        # Residual diagnostics
+        diag_figs, residuals = residual_diagnostics(results, lags=30)
+        figs.extend(diag_figs)
+
+        # Forecast plots (log scale)
+        fig_log, forecast_mean_log, conf_int_log = sarima_forecast_plots(
+            train, test, results, back_transform=False
+        )
+        figs.append(fig_log)
+
+        # Forecast plots (original scale)
+        fig_orig, forecast_mean_orig, conf_int_orig = sarima_forecast_plots(
+            train, test, results, back_transform=True
+        )
+        figs.append(fig_orig)
+
+        # Tables with numeric results (optional, nice for inspection)
+        tables["sarima_residuals"] = residuals.to_frame(name="residuals")
+        tables["sarima_forecast_log"] = pd.DataFrame(
+            {
+                "forecast_mean": forecast_mean_log,
+                "ci_lower": conf_int_log.iloc[:, 0],
+                "ci_upper": conf_int_log.iloc[:, 1],
+            }
+        )
+        tables["sarima_forecast_original"] = pd.DataFrame(
+            {
+                "forecast_mean": np.exp(forecast_mean_orig),
+                "ci_lower": np.exp(conf_int_orig.iloc[:, 0]),
+                "ci_upper": np.exp(conf_int_orig.iloc[:, 1]),
+            },
+            index=forecast_mean_orig.index,
+        )
+
+        text = (
+            "I ran the full SARIMA workflow similar to your notebook:\n"
+            "- Log-transformed the series to reduce variance\n"
+            "- Split the data into 80% train / 20% test\n"
+            "- Fitted SARIMA(1,0,0)x(0,1,1,12)\n"
+            "- Produced residual plots plus ACF and PACF of residuals\n"
+            "- Generated forecasts in both log scale and back-transformed "
+            "original scale, with confidence intervals.\n\n"
+            "Use the residual diagnostics to check model adequacy and the "
+            "forecast plots to interpret future behaviour."
+        )
+
+        return text, figs, tables
+
     def _answer_about_dataset(self, user_message: str) -> str:
         """
-        For now, this just lets Gemini explain the dataset conceptually using
-        the known column names. You can later enrich this by querying
-        BigQuery INFORMATION_SCHEMA for real metadata and row counts.
+        Let Gemini explain the dataset conceptually using known configuration.
         """
         prompt = f"""
 You are a data analyst explaining a BigQuery time-series dataset to a student.
@@ -236,78 +474,34 @@ Dataset info:
 User question:
 {user_message}
 
-Explain clearly, in a few short paragraphs, what this dataset likely represents,
+Explain clearly, in a few short paragraphs, what the dataset likely represents,
 how it could be used, and how forecasts on the target column would be interpreted.
 """
         response = self.model.generate_content(prompt)
         return response.text
 
-    def _run_forecast(self, periods: int) -> (str, Optional[Any]):
-        """
-        Runs the ARIMA forecast on the configured dataset/table using
-        BigQueryClient.get_time_series() and utils.fit_arima_and_forecast().
-        """
-        df = self.bq_client.get_time_series(
-            dataset=self.app_config.dataset_id,
-            table=self.app_config.table_id,
-            date_column=self.app_config.date_column,
-            target_column=self.app_config.target_column,
-            limit=365,
-        )
-
-        if df.empty:
-            return (
-                "I tried to query the time series from BigQuery but received no data. "
-                "Please check that the dataset, table, and column names are correct.",
-                None,
-            )
-
-        result = fit_arima_and_forecast(
-            df=df,
-            ts_col="ts",
-            target_col="y",
-            periods=periods,
-        )
-        forecast_df = forecast_to_dataframe(result)
-
-        # Let Gemini generate a short explanation of the forecast
-        # (purely optional, a nice touch for the course).
-        summary_prompt = f"""
-You are a data scientist explaining an ARIMA forecast to a marketing / business audience.
-
-We have a time series of `{self.app_config.target_column}` and we ran an ARIMA model
-to forecast the next {periods} steps (e.g. days).
-
-Explain in simple language:
-- what the model is doing,
-- how to interpret "history" vs "forecast",
-- one or two potential use cases.
-
-Keep it under 2 short paragraphs.
-"""
-        response = self.model.generate_content(summary_prompt)
-        explanation = response.text
-
-        return explanation, forecast_df
-
 
 # ---------------------------------------------------------------------------
-# Simple CLI test (optional)
+# Simple CLI test (once GCP + Vertex are configured)
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     """
-    This block lets you quickly test the planning behaviour from the terminal,
-    once your GCP + Vertex setup is ready:
+    Example:
 
         uv run python vertex_agent.py
+
+    Then type in some questions when you wire this into a simple CLI,
+    or just inspect the plan for a single test question as below.
     """
     app_cfg = AppConfig.from_env()
     vx_cfg = VertexConfig.from_env()
     agent = DataAgent(app_cfg, vx_cfg)
 
-    question = "Can you forecast the metric for the next 14 days?"
+    question = "Run the full SARIMA workflow like in my notebook."
     result = agent.handle_message(question)
 
     print("PLAN:", json.dumps(result["plan"], indent=2))
-    print("\nRESPONSE TEXT:\n", result["text"])
+    print("\nTEXT:\n", result["text"])
+    print("\nFigures:", len(result["figures"]))
+    print("Tables:", list(result["tables"].keys()))
