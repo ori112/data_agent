@@ -1,7 +1,4 @@
-# app.py
-
 from __future__ import annotations
-import os
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -14,7 +11,7 @@ from utils import (
     handle_user_message,
 )
 
-# Load .env file
+# Load environment variables from .env
 load_dotenv()
 
 
@@ -66,6 +63,7 @@ def main() -> None:
         "- **BQ_TABLE**\n"
         "- **GOOGLE_APPLICATION_CREDENTIALS**"
     )
+
     # -----------------------------
     # CONVERSATIONAL UI
     # -----------------------------
@@ -91,7 +89,6 @@ def main() -> None:
 
         reply = handle_user_message(user_input, config=cfg)
         st.session_state["messages"].append({"role": "assistant", "content": reply})
-
         st.experimental_rerun()
 
     st.markdown("---")
@@ -104,8 +101,8 @@ def main() -> None:
     if st.button("Run demo forecast"):
         try:
             client = BigQueryClient.from_env()
-            client.project_id = project_id  # override if different
-        except Exception as e:
+            client.project_id = project_id  # override if user changed it
+        except Exception as e:  # noqa: BLE001
             st.error(f"Failed to create BigQuery client:\n{e}")
             st.stop()
 
@@ -128,7 +125,6 @@ def main() -> None:
                 target_col="y",
                 periods=horizon,
             )
-
             df_plot = forecast_to_dataframe(result)
 
         st.success("Forecast generated!")
@@ -137,7 +133,9 @@ def main() -> None:
 
         with col1:
             chart_data = df_plot.reset_index(names="ts").pivot_table(
-                index="ts", columns="type", values="y"
+                index="ts",
+                columns="type",
+                values="y",
             )
             st.line_chart(chart_data)
 
