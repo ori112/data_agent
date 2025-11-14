@@ -1,10 +1,44 @@
 # Python-generated files
 __pycache__/
 *.py[oc]
+*.pyo
+*.pyd
+*.so
+*.dll
+
+# Build artifacts
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
 
 # Virtual environments
-.venv
+.venv/
+.env
+env/
+venv/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# macOS/Windows system files
+.DS_Store
+Thumbs.db
+
+# VSCode
+.vscode/
+
+# Streamlit cache
+.streamlit/
+
+# Local environment & secrets
+*.env
+*.key.json
+*.credentials.json
+
+# BigQuery temporary local files
+*.bq
+*.json.tmp
+
+# uv cache
+.uv/
