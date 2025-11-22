@@ -36,6 +36,9 @@ Thumbs.db
 *.key.json
 *.credentials.json
 
+secrets/
+*.json
+
 # BigQuery temporary local files
 *.bq
 *.json.tmp
