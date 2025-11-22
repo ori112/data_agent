@@ -5,8 +5,8 @@ Prototype data agent for my university project, built with:
 - **Python 3.12**
 - **Streamlit** for the conversational UI
 - **BigQuery** for data access
-- **ARIMA** (statsmodels) for time-series forecasting
-- **Vertex AI** (planned) for a smarter conversational agent
+- **ARIMA** for time-series forecasting
+- **Vertex AI** for a smarter conversational agent
 
 ## Quick start (local)
 
