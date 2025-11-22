@@ -1,22 +1,27 @@
-# data_agent
+# BigQuery Time-Series Agent
 
-Prototype data agent for my university project, built with:
+Course prototype:
+- Streamlit conversational UI
+- BigQuery time-series mart as data source
+- Gemini on Vertex AI for interpretation + tool planning
+- Time-series EDA + SARIMA modeling
 
-- **Python 3.12**
-- **Streamlit** for the conversational UI
-- **BigQuery** for data access
-- **ARIMA** for time-series forecasting
-- **Vertex AI** for a smarter conversational agent
+## Features
+Two intents only:
+1. **EDA**:
+   - log transform
+   - time-series plot
+   - ACF / PACF
+   - seasonal decomposition
+   - ADF stationarity test
+   - year comparisons (AVG/MIN/MAX)
 
-## Quick start (local)
+2. **MODEL**:
+   - SARIMA(1,0,0)x(0,1,1,12) on log(y)
+   - residual diagnostics
+   - forecast plots (log + original scale)
 
+## Run locally
 ```bash
-# create & activate venv (uv)
-uv venv
-.\.venv\Scripts\activate   # on Windows
-
-# install dependencies
 uv sync
-
-# run the app
-streamlit run app.py
+uv run streamlit run app.py

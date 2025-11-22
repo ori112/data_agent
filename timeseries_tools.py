@@ -1,4 +1,31 @@
 # timeseries_tools.py
+"""
+timeseries_tools.py
+-------------------
+Pure statistical/plotting tools for EDA + modeling.
+
+This module is intentionally *deterministic*:
+- No LLM calls here.
+- Only math, statsmodels, seaborn/matplotlib.
+
+The Vertex agent calls these tools and then asks Gemini
+to *interpret* the deterministic results.
+
+Main functions:
+1) diagnostics_bundle(df):
+   - log transform
+   - line plot
+   - ACF/PACF
+   - seasonal decomposition
+   - returns figures + computed stats for interpretation
+
+2) Modeling helpers:
+   - train_test_split_series
+   - fit_sarima
+   - residual_diagnostics
+   - sarima_forecast_plots
+
+"""
 
 from __future__ import annotations
 
@@ -10,14 +37,12 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from statsmodels.tsa.statespace.sarimax import SARIMAX
-from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.stattools import adfuller, acf, pacf
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from statsmodels.tsa.seasonal import seasonal_decompose
 
 
-# -------------------------------------------------------------------
-# Basic visualizations and transforms
-# -------------------------------------------------------------------
+# ---------------- Basic visual helpers ----------------
 
 
 def plot_time_series(
@@ -26,7 +51,10 @@ def plot_time_series(
     value_col: str,
     title: str | None = None,
 ) -> plt.Figure:
-    """Line plot of the time series."""
+    """
+    Line plot of a time series dataframe.
+    Returns a matplotlib Figure for Streamlit to render.
+    """
     fig, ax = plt.subplots(figsize=(16, 6))
     sns.lineplot(data=df, x=date_col, y=value_col, ax=ax)
     ax.set_title(title or f"{value_col} over time")
@@ -36,32 +64,33 @@ def plot_time_series(
 
 
 def log_transform(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
-    """Return a copy of df with log transform applied to value_col."""
+    """
+    Take natural log of a series column.
+    Used to stabilize variance (heteroscedasticity).
+    """
     df_log = df.copy()
     df_log[value_col] = np.log(df_log[value_col])
     return df_log
-
-
-# -------------------------------------------------------------------
-# Diagnostics: ACF, PACF, decomposition, ADF
-# -------------------------------------------------------------------
 
 
 def plot_acf_pacf_series(
     series: pd.Series,
     lags: int = 40,
 ) -> Tuple[plt.Figure, plt.Figure]:
-    """Return ACF and PACF plots for a series."""
+    """
+    Plot ACF and PACF for a given univariate series.
+    Returns (acf_fig, pacf_fig).
+    """
     fig_acf, ax_acf = plt.subplots(figsize=(12, 6))
     plot_acf(series, lags=lags, ax=ax_acf)
     ax_acf.set_title("ACF")
+    fig_acf.tight_layout()
 
     fig_pacf, ax_pacf = plt.subplots(figsize=(12, 6))
     plot_pacf(series, lags=lags, ax=ax_pacf)
     ax_pacf.set_title("PACF")
-
-    fig_acf.tight_layout()
     fig_pacf.tight_layout()
+
     return fig_acf, fig_pacf
 
 
@@ -70,7 +99,10 @@ def seasonal_decompose_plot(
     period: int = 12,
     model: str = "additive",
 ) -> plt.Figure:
-    """Run seasonal decomposition and return the figure."""
+    """
+    Seasonal decomposition (trend/seasonal/residual).
+    period=12 matches monthly seasonality.
+    """
     decompose = seasonal_decompose(series, model=model, period=period)
     fig = decompose.plot()
     fig.set_size_inches(12, 8)
@@ -78,8 +110,14 @@ def seasonal_decompose_plot(
     return fig
 
 
+# ---------------- Stats helpers ----------------
+
+
 def run_adf_test(series: pd.Series) -> Dict[str, Any]:
-    """Run Augmented Dickey-Fuller test and return stats + interpretation."""
+    """
+    Augmented Dickey-Fuller test for stationarity.
+    Returns statistics + human-readable interpretation.
+    """
     result = adfuller(series.dropna())
     stat, pvalue, usedlag, nobs, crit_vals, icbest = result
 
@@ -91,27 +129,25 @@ def run_adf_test(series: pd.Series) -> Dict[str, Any]:
     )
 
     return {
-        "adf_statistic": stat,
-        "p_value": pvalue,
-        "used_lag": usedlag,
-        "n_obs": nobs,
-        "critical_values": crit_vals,
-        "ic_best": icbest,
-        "is_stationary": is_stationary,
+        "adf_statistic": float(stat),
+        "p_value": float(pvalue),
+        "used_lag": int(usedlag),
+        "n_obs": int(nobs),
+        "critical_values": {k: float(v) for k, v in crit_vals.items()},
+        "ic_best": float(icbest),
+        "is_stationary": bool(is_stationary),
         "interpretation": interpretation,
     }
-
-
-# -------------------------------------------------------------------
-# Train / test split and SARIMA modeling
-# -------------------------------------------------------------------
 
 
 def train_test_split_series(
     series: pd.Series,
     train_ratio: float = 0.8,
 ) -> Tuple[pd.Series, pd.Series]:
-    """Simple chronological split of a series into train and test parts."""
+    """
+    Chronological split for time-series.
+    (No shuffle!)
+    """
     n = len(series)
     train_size = int(n * train_ratio)
     train = series.iloc[:train_size]
@@ -123,8 +159,11 @@ def fit_sarima(
     train: pd.Series,
     order: tuple[int, int, int] = (1, 0, 0),
     seasonal_order: tuple[int, int, int, int] = (0, 1, 1, 12),
-) -> Any:
-    """Fit SARIMAX model and return fitted results object."""
+):
+    """
+    Fit SARIMA model on train series.
+    We turn off enforce_stationarity/invertibility because real data is messy.
+    """
     model = SARIMAX(
         train,
         order=order,
@@ -132,53 +171,64 @@ def fit_sarima(
         enforce_stationarity=False,
         enforce_invertibility=False,
     )
-    results = model.fit()
-    return results
+    return model.fit()
 
 
 def residual_diagnostics(
-    results: Any,
+    results,
     lags: int = 30,
-) -> Tuple[List[plt.Figure], pd.Series]:
-    """Plot residuals + ACF/PACF of residuals; return figures and residual series."""
-    residuals = results.resid
+) -> Tuple[List[plt.Figure], pd.Series, Dict[str, Any]]:
+    """
+    Residual diagnostics:
+      - residual time plot
+      - residual ACF
+      - residual PACF
 
+    Returns:
+      figs, residuals_series, residual_stats
+    """
+    residuals = results.resid
     figs: List[plt.Figure] = []
 
-    # Residuals over time
     fig_res, ax_res = plt.subplots(figsize=(10, 4))
     ax_res.plot(residuals)
     ax_res.set_title("Residuals of SARIMA Model")
     fig_res.tight_layout()
     figs.append(fig_res)
 
-    # ACF of residuals
     fig_acf, ax_acf = plt.subplots(figsize=(10, 4))
     plot_acf(residuals, lags=lags, ax=ax_acf)
     ax_acf.set_title("Residuals ACF")
     fig_acf.tight_layout()
     figs.append(fig_acf)
 
-    # PACF of residuals
     fig_pacf, ax_pacf = plt.subplots(figsize=(10, 4))
     plot_pacf(residuals, lags=lags, ax=ax_pacf)
     ax_pacf.set_title("Residuals PACF")
     fig_pacf.tight_layout()
     figs.append(fig_pacf)
 
-    return figs, residuals
+    resid_stats = {
+        "resid_mean": float(np.mean(residuals)),
+        "resid_std": float(np.std(residuals)),
+        "resid_min": float(np.min(residuals)),
+        "resid_max": float(np.max(residuals)),
+    }
+
+    return figs, residuals, resid_stats
 
 
 def sarima_forecast_plots(
     train: pd.Series,
     test: pd.Series,
-    results: Any,
+    results,
     back_transform: bool = False,
-) -> Tuple[plt.Figure, pd.Series, pd.DataFrame]:
+):
     """
-    Forecast the length of `test` and produce a plot.
-    If back_transform=True, exponentiate values to original scale.
-    Returns (figure, forecast_mean, conf_int_df).
+    Create forecast plot on train/test split.
+
+    back_transform=True:
+      assumes series is log-scale and exp() back to original.
     """
     steps = len(test)
     forecast = results.get_forecast(steps=steps)
@@ -214,3 +264,63 @@ def sarima_forecast_plots(
     fig.tight_layout()
 
     return fig, forecast_mean, conf_int
+
+
+# ---------------- EDA bundle ----------------
+
+
+def diagnostics_bundle(
+    df: pd.DataFrame,
+    ts_col: str = "ts",
+    target_col: str = "y",
+    seasonal_period: int = 12,
+    lags: int = 40,
+) -> Dict[str, Any]:
+    """
+    Full deterministic EDA bundle.
+
+    Steps:
+    1) sort + clean data
+    2) log transform y
+    3) plot log series
+    4) plot ACF/PACF on log series
+    5) seasonal decomposition on log series
+    6) compute summary stats for LLM interpretation
+    """
+    df = df[[ts_col, target_col]].dropna().sort_values(ts_col)
+    series = df.set_index(ts_col)[target_col]
+
+    df_log = df.copy()
+    df_log[target_col] = np.log(df_log[target_col])
+    series_log = df_log.set_index(ts_col)[target_col]
+
+    figures: List[plt.Figure] = []
+    figures.append(
+        plot_time_series(df_log, ts_col, target_col, "Log-transformed series")
+    )
+
+    fig_acf, fig_pacf = plot_acf_pacf_series(series_log, lags=lags)
+    figures.extend([fig_acf, fig_pacf])
+
+    figures.append(seasonal_decompose_plot(series_log, period=seasonal_period))
+
+    acf_vals = acf(series_log.dropna(), nlags=lags)
+    pacf_vals = pacf(series_log.dropna(), nlags=lags)
+
+    stats = {
+        "n_rows": int(len(series_log)),
+        "date_min": str(df[ts_col].min().date()),
+        "date_max": str(df[ts_col].max().date()),
+        "mean_log": float(series_log.mean()),
+        "std_log": float(series_log.std()),
+        "acf_first_5": [float(x) for x in acf_vals[1:6]],
+        "pacf_first_5": [float(x) for x in pacf_vals[1:6]],
+        "acf_lag12": float(acf_vals[12]) if len(acf_vals) > 12 else None,
+        "acf_lag24": float(acf_vals[24]) if len(acf_vals) > 24 else None,
+        "pacf_lag12": float(pacf_vals[12]) if len(pacf_vals) > 12 else None,
+        "pacf_lag24": float(pacf_vals[24]) if len(pacf_vals) > 24 else None,
+        "seasonal_period_assumed": seasonal_period,
+        "notes": "Computed on log(y).",
+    }
+
+    return {"figures": figures, "stats": stats}
