@@ -66,7 +66,7 @@ def plot_time_series(
 def log_transform(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
     """
     Take natural log of a series column.
-    Used to stabilize variance (heteroscedasticity).
+    Used to stabilize variance.
     """
     df_log = df.copy()
     df_log[value_col] = np.log(df_log[value_col])

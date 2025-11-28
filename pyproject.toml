@@ -1,7 +1,7 @@
 [project]
 name = "data-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "A data agent Designed to Analyse Time series data"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
