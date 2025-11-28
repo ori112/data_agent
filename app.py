@@ -52,9 +52,8 @@ def main() -> None:
         page_title="BigQuery Time-Series Agent", page_icon="📈", layout="wide"
     )
 
-    st.title("📈 BigQuery Time-Series Agent")
+    st.title("📈 Time-Series Agent")
     st.caption(
-        "Two intents only: EDA or MODEL. "
         "EDA includes diagnostics + comparisons. MODEL includes SARIMA forecasting."
     )
 
@@ -101,6 +100,7 @@ def main() -> None:
 
     # ---------------- Chat UI ----------------
     st.subheader("💬 Chat with your Data Agent")
+    st.caption("You can ask me everything from data exploration up to data modeling")
 
     # render prior messages
     for msg in st.session_state["messages"]:
@@ -169,45 +169,6 @@ def main() -> None:
             st.dataframe(df_tbl, use_container_width=True)
 
     st.markdown("---")
-
-    # ---------------- Quick ARIMA demo ----------------
-    st.subheader("🔮 Quick demo: ARIMA forecast from BigQuery")
-
-    if st.button("Run demo forecast"):
-        client = BigQueryClient.from_env()
-        client.project_id = project_id
-
-        with st.status("Running demo forecast...", expanded=True) as status:
-            status.write("Querying BigQuery...")
-            with st.spinner("Fetching full history from BigQuery..."):
-                df = client.get_time_series(
-                    dataset=dataset_id,
-                    table=table_id,
-                    date_column=date_column,
-                    target_column=target_column,
-                    limit=None,
-                )
-
-            status.write("Fitting ARIMA model...")
-            with st.spinner("Fitting ARIMA on full history..."):
-                result = fit_arima_and_forecast(df, "ts", "y", periods=horizon)
-                df_plot = forecast_to_dataframe(result)
-
-            status.update(label="Forecast ready ✅", state="complete", expanded=False)
-
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            chart_data = df_plot.reset_index(names="ts").pivot_table(
-                index="ts", columns="type", values="y"
-            )
-            st.line_chart(chart_data)
-
-        with col2:
-            st.write("Raw BigQuery sample:")
-            st.dataframe(df.head())
-
-            st.write("Forecast head:")
-            st.dataframe(df_plot[df_plot["type"] == "forecast"].head())
 
 
 if __name__ == "__main__":
